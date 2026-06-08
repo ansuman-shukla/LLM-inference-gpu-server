@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Miscellaneous
+sync-from-yral.sh
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Alembic / local DB artifacts
+*.sqlite
+*.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Benchmark outputs
+benchmarks/output/
+*.jsonl
+
+# Local runtime files
+tmp/
+spool/
+
+
+# Agents 
+AGENT.md
+

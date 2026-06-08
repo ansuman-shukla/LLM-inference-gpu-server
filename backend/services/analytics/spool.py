@@ -1,0 +1,1 @@
+"""Analytics spool storage."""
