@@ -9,3 +9,4 @@ uv sync
 uv run uvicorn backend.main:app --reload
 ```
 
+Cwazzzy readme 
