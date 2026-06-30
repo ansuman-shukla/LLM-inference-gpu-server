@@ -27,6 +27,7 @@ class VLLMClient:
         read_timeout_seconds: float = 600.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        timeout: float | httpx.Timeout
         if timeout_seconds is not None:
             timeout = timeout_seconds
         else:
