@@ -96,7 +96,7 @@ def test_switch_template_script_syncs_app_env_with_l4_qwen_runtime() -> None:
         'VLLM_GPU_MEMORY_UTILIZATION="0.95"',
         'VLLM_MAX_NUM_SEQS="8"',
         'VLLM_MAX_NUM_BATCHED_TOKENS="16384"',
-        'enable-chunked-prefill',
+        "enable-chunked-prefill",
         'VLLM_KV_CACHE_DTYPE=\\"${VLLM_KV_CACHE_DTYPE}\\"',
         'VLLM_REASONING_PARSER=\\"${VLLM_REASONING_PARSER}\\"',
         'VLLM_TRUST_REMOTE_CODE=\\"${VLLM_TRUST_REMOTE_CODE}\\"',
