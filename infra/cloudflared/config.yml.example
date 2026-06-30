@@ -1,8 +1,28 @@
 tunnel: gpu-inference-backend
 credentials-file: /etc/cloudflared/credentials.json
 
+# Public traffic must terminate at the FastAPI gateway only. Keep this file in
+# the same rule order in production: deny private paths first, then route the
+# public OpenAI-compatible API to the FastAPI gateway.
 ingress:
-  - hostname: inference.example.com
-    service: http://localhost:8000
+  - hostname: model.ansuman.yral.com
+    path: /metrics
+    service: http_status:404
+  - hostname: model.ansuman.yral.com
+    path: /metrics/*
+    service: http_status:404
+  - hostname: model.ansuman.yral.com
+    path: /admin
+    service: http_status:404
+  - hostname: model.ansuman.yral.com
+    path: /admin/*
+    service: http_status:404
+  - hostname: model.ansuman.yral.com
+    path: /debug
+    service: http_status:404
+  - hostname: model.ansuman.yral.com
+    path: /debug/*
+    service: http_status:404
+  - hostname: model.ansuman.yral.com
+    service: http://127.0.0.1:8002
   - service: http_status:404
-

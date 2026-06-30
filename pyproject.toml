@@ -6,9 +6,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.13.0",
+    "asyncpg>=0.29.0",
+    "clickhouse-connect>=0.8.0",
     "fastapi>=0.111.0",
+    "httpx>=0.28.0",
+    "prometheus-client>=0.20.0",
     "pydantic-settings>=2.0.0",
-    "sqlalchemy>=2.0.0",
+    "redis>=5.0.0",
+    "sentry-sdk[fastapi]>=2.0.0",
+    "sqlalchemy>=2.0.18",
     "uvicorn[standard]>=0.30.0",
 ]
 

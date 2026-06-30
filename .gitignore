@@ -23,9 +23,6 @@ env/
 *.log
 logs/
 
-# Miscellaneous
-sync-from-yral.sh
-
 # OS / editor
 .DS_Store
 .vscode/
@@ -51,4 +48,3 @@ spool/
 
 # Agents 
 AGENT.md
-

@@ -1,0 +1,266 @@
+name: deploy-vast
+
+on:
+  workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: "Create/update the non-root deploy user using root SSH"
+        required: false
+        type: boolean
+        default: false
+      deploy:
+        description: "Deploy the current ref to Vast after checks pass"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: deploy-vast-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  VAST_HOST: ${{ vars.VAST_HOST }}
+  VAST_SSH_PORT: ${{ vars.VAST_SSH_PORT || '22' }}
+  VAST_DEPLOY_USER: ${{ vars.VAST_DEPLOY_USER || 'deploy' }}
+  VAST_ROOT_USER: ${{ vars.VAST_ROOT_USER || 'root' }}
+  REMOTE_APP_ROOT: ${{ vars.VAST_APP_ROOT || '/opt/gpu-inference-backend' }}
+  DEPLOY_HEALTH_TIMEOUT_SECONDS: ${{ vars.DEPLOY_HEALTH_TIMEOUT_SECONDS || '1200' }}
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Run CI checks
+        run: make ci
+
+  bootstrap-vast:
+    name: bootstrap vast deploy user
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs:
+      - checks
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH keys
+        env:
+          ROOT_SSH_PRIVATE_KEY: ${{ secrets.VAST_ROOT_SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.VAST_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "${VAST_HOST}" ]; then
+            echo "::error::Set repo variable VAST_HOST"
+            exit 1
+          fi
+          if [ -z "${ROOT_SSH_PRIVATE_KEY}" ]; then
+            echo "::error::Set secret VAST_ROOT_SSH_PRIVATE_KEY for bootstrap"
+            exit 1
+          fi
+          if [ -z "${DEPLOY_SSH_PRIVATE_KEY}" ]; then
+            echo "::error::Set secret VAST_SSH_PRIVATE_KEY for deploy user auth"
+            exit 1
+          fi
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${ROOT_SSH_PRIVATE_KEY}" > ~/.ssh/vast_root_key
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > ~/.ssh/vast_deploy_key
+          chmod 600 ~/.ssh/vast_root_key ~/.ssh/vast_deploy_key
+          ssh-keygen -y -f ~/.ssh/vast_deploy_key > "${RUNNER_TEMP}/vast_deploy_key.pub"
+          ssh-keyscan -p "${VAST_SSH_PORT}" "${VAST_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Bootstrap deploy user
+        run: |
+          root_target="${VAST_ROOT_USER}@${VAST_HOST}"
+          ssh_options=(-i ~/.ssh/vast_root_key -o IdentitiesOnly=yes -p "${VAST_SSH_PORT}")
+          scp_options=(-i ~/.ssh/vast_root_key -o IdentitiesOnly=yes -P "${VAST_SSH_PORT}")
+          remote_tmp="/tmp/gpu-inference-bootstrap-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          ssh "${ssh_options[@]}" "${root_target}" "mkdir -p '${remote_tmp}'"
+          scp "${scp_options[@]}" infra/vast/bootstrap-deploy-user.sh \
+            "${root_target}:${remote_tmp}/bootstrap-deploy-user.sh"
+          scp "${scp_options[@]}" "${RUNNER_TEMP}/vast_deploy_key.pub" \
+            "${root_target}:${remote_tmp}/vast_deploy_key.pub"
+          ssh "${ssh_options[@]}" "${root_target}" \
+            "APP_ROOT='${REMOTE_APP_ROOT}' bash '${remote_tmp}/bootstrap-deploy-user.sh' '${VAST_DEPLOY_USER}' '${remote_tmp}/vast_deploy_key.pub'"
+
+  deploy-vast:
+    name: deploy to vast
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs:
+      - checks
+      - bootstrap-vast
+    if: >-
+      ${{
+        always() &&
+        needs.checks.result == 'success' &&
+        (needs.bootstrap-vast.result == 'success' || needs.bootstrap-vast.result == 'skipped') &&
+        inputs.deploy
+      }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release archive
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.env' \
+            --exclude='.venv' \
+            --exclude='.mypy_cache' \
+            --exclude='.pytest_cache' \
+            --exclude='.ruff_cache' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            -czf "${RUNNER_TEMP}/gpu-inference-backend.tgz" \
+            .
+
+      - name: Render app environment
+        env:
+          APP_ENV: ${{ vars.APP_ENV || 'production' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REDIS_URL: ${{ vars.REDIS_URL || 'redis://127.0.0.1:6379/0' }}
+          RATE_LIMIT_RPM: ${{ vars.RATE_LIMIT_RPM || '1000' }}
+          CONCURRENT_REQUEST_LIMIT: ${{ vars.CONCURRENT_REQUEST_LIMIT || '10' }}
+          TOKEN_LIMIT_TPM: ${{ vars.TOKEN_LIMIT_TPM || '2097152' }}
+          MAX_INPUT_TOKENS: ${{ vars.MAX_INPUT_TOKENS || '24576' }}
+          MAX_OUTPUT_TOKENS: ${{ vars.MAX_OUTPUT_TOKENS || '8192' }}
+          MAX_TOTAL_TOKENS: ${{ vars.MAX_TOTAL_TOKENS || '32768' }}
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL || vars.CLICKHOUSE_URL }}
+          CLICKHOUSE_DATABASE: ${{ secrets.CLICKHOUSE_DATABASE || vars.CLICKHOUSE_DATABASE || 'yral' }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER || vars.CLICKHOUSE_USER || 'gpu_inference' }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_SECURE: ${{ vars.CLICKHOUSE_SECURE || 'true' }}
+          CLICKHOUSE_VERIFY: ${{ vars.CLICKHOUSE_VERIFY || 'false' }}
+          CLICKHOUSE_CLUSTER: ${{ vars.CLICKHOUSE_CLUSTER || 'default' }}
+          ANALYTICS_QUEUE_SIZE: ${{ vars.ANALYTICS_QUEUE_SIZE || '1000' }}
+          ANALYTICS_FLUSH_BATCH_SIZE: ${{ vars.ANALYTICS_FLUSH_BATCH_SIZE || '500' }}
+          VLLM_BASE_URL: ${{ vars.VLLM_BASE_URL || 'http://127.0.0.1:18000' }}
+          VLLM_HOST: ${{ vars.VLLM_HOST || '127.0.0.1' }}
+          VLLM_PORT: ${{ vars.VLLM_PORT || '18000' }}
+          VLLM_MANAGED: ${{ vars.VLLM_MANAGED || 'false' }}
+          VLLM_MODEL_PATH: ${{ vars.VLLM_MODEL_PATH || 'Qwen/Qwen3.6-27B-FP8' }}
+          VLLM_SERVED_MODEL_NAME: ${{ vars.VLLM_SERVED_MODEL_NAME || 'Qwen/Qwen3.6-27B-FP8' }}
+          VLLM_TENSOR_PARALLEL_SIZE: ${{ vars.VLLM_TENSOR_PARALLEL_SIZE || '2' }}
+          VLLM_MAX_MODEL_LEN: ${{ vars.VLLM_MAX_MODEL_LEN || '32768' }}
+          VLLM_GPU_MEMORY_UTILIZATION: ${{ vars.VLLM_GPU_MEMORY_UTILIZATION || '0.95' }}
+          VLLM_MAX_NUM_SEQS: ${{ vars.VLLM_MAX_NUM_SEQS || '8' }}
+          VLLM_MAX_NUM_BATCHED_TOKENS: ${{ vars.VLLM_MAX_NUM_BATCHED_TOKENS || '16384' }}
+          VLLM_ENABLE_CHUNKED_PREFILL: ${{ vars.VLLM_ENABLE_CHUNKED_PREFILL || 'true' }}
+          VLLM_KV_CACHE_DTYPE: ${{ vars.VLLM_KV_CACHE_DTYPE || 'fp8' }}
+          VLLM_REASONING_PARSER: ${{ vars.VLLM_REASONING_PARSER || 'qwen3' }}
+          VLLM_TRUST_REMOTE_CODE: ${{ vars.VLLM_TRUST_REMOTE_CODE || 'true' }}
+          VLLM_STARTUP_TIMEOUT_SECONDS: ${{ vars.VLLM_STARTUP_TIMEOUT_SECONDS || '900' }}
+          VLLM_CONNECT_TIMEOUT_SECONDS: ${{ vars.VLLM_CONNECT_TIMEOUT_SECONDS || '10' }}
+          VLLM_READ_TIMEOUT_SECONDS: ${{ vars.VLLM_READ_TIMEOUT_SECONDS || '600' }}
+          MODEL_IDS: ${{ vars.MODEL_IDS || 'Qwen/Qwen3.6-27B-FP8' }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          API_KEY_PREFIX: ${{ vars.API_KEY_PREFIX || 'an' }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_SEND_DEFAULT_PII: ${{ vars.SENTRY_SEND_DEFAULT_PII || 'false' }}
+          SENTRY_TRACES_SAMPLE_RATE: ${{ vars.SENTRY_TRACES_SAMPLE_RATE || '0.05' }}
+          SERVICE_NAME: ${{ vars.SERVICE_NAME || 'gpu-inference-backend' }}
+          RELEASE: ${{ github.sha }}
+        run: infra/vast/write-deploy-env.sh "${RUNNER_TEMP}/app.env"
+
+      - name: Write cloudflared token file
+        env:
+          CLOUDFLARED_TOKEN: ${{ secrets.CLOUDFLARED_TOKEN }}
+        run: |
+          if [ -z "${CLOUDFLARED_TOKEN}" ]; then
+            echo "::error::Set secret CLOUDFLARED_TOKEN"
+            exit 1
+          fi
+
+          umask 077
+          printf '%s' "${CLOUDFLARED_TOKEN}" > "${RUNNER_TEMP}/cloudflared-token"
+
+      - name: Write tailscale auth key file
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          if [ -z "${TAILSCALE_AUTH_KEY}" ]; then
+            echo "::error::Set secret TAILSCALE_AUTH_KEY so Vast can reach private Postgres over Tailscale"
+            exit 1
+          fi
+
+          umask 077
+          printf '%s' "${TAILSCALE_AUTH_KEY}" > "${RUNNER_TEMP}/tailscale-authkey"
+
+      - name: Configure deploy SSH key
+        env:
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.VAST_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "${VAST_HOST}" ]; then
+            echo "::error::Set repo variable VAST_HOST"
+            exit 1
+          fi
+          if [ -z "${DEPLOY_SSH_PRIVATE_KEY}" ]; then
+            echo "::error::Set secret VAST_SSH_PRIVATE_KEY"
+            exit 1
+          fi
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${DEPLOY_SSH_PRIVATE_KEY}" > ~/.ssh/vast_deploy_key
+          chmod 600 ~/.ssh/vast_deploy_key
+          ssh-keyscan -p "${VAST_SSH_PORT}" "${VAST_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Upload and activate release
+        run: |
+          deploy_target="${VAST_DEPLOY_USER}@${VAST_HOST}"
+          remote_tmp="/tmp/gpu-inference-deploy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ssh_options=(-i ~/.ssh/vast_deploy_key -o IdentitiesOnly=yes -p "${VAST_SSH_PORT}")
+          scp_options=(-i ~/.ssh/vast_deploy_key -o IdentitiesOnly=yes -P "${VAST_SSH_PORT}")
+
+          ssh "${ssh_options[@]}" "${deploy_target}" "mkdir -p '${remote_tmp}'"
+          scp "${scp_options[@]}" "${RUNNER_TEMP}/gpu-inference-backend.tgz" \
+            "${deploy_target}:${remote_tmp}/release.tgz"
+          scp "${scp_options[@]}" "${RUNNER_TEMP}/app.env" \
+            "${deploy_target}:${remote_tmp}/app.env"
+          scp "${scp_options[@]}" "${RUNNER_TEMP}/cloudflared-token" \
+            "${deploy_target}:${remote_tmp}/cloudflared-token"
+          scp "${scp_options[@]}" "${RUNNER_TEMP}/tailscale-authkey" \
+            "${deploy_target}:${remote_tmp}/tailscale-authkey"
+          scp "${scp_options[@]}" infra/vast/deploy-release.sh \
+            "${deploy_target}:${remote_tmp}/deploy-release.sh"
+
+          ssh "${ssh_options[@]}" "${deploy_target}" \
+            "APP_ROOT='${REMOTE_APP_ROOT}' DEPLOY_HEALTH_TIMEOUT_SECONDS='${DEPLOY_HEALTH_TIMEOUT_SECONDS}' bash '${remote_tmp}/deploy-release.sh' '${remote_tmp}/release.tgz' '${remote_tmp}/app.env' '${GITHUB_SHA}' '${remote_tmp}/cloudflared-token' '${remote_tmp}/tailscale-authkey'"
+
+      - name: Public smoke check
+        env:
+          PUBLIC_HEALTH_URL: ${{ vars.PUBLIC_HEALTH_URL }}
+        run: |
+          if [ -z "${PUBLIC_HEALTH_URL}" ]; then
+            echo "PUBLIC_HEALTH_URL is not set; skipping public smoke check"
+            exit 0
+          fi
+
+          curl -fsS --max-time 30 "${PUBLIC_HEALTH_URL%/}/health" >/dev/null
